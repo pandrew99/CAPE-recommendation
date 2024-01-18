@@ -1,0 +1,890 @@
+---
+title: "COGS 137 Final Project - CAPE Instructor Recommendation Rates"
+author: "Kacie Li, Van Nguyen, Andrew Pan, Kaushika Uppu"
+output: 
+  html_document:
+    theme: sandstone
+    toc: TRUE
+    toc_float: TRUE
+---
+
+## Introduction
+
+The practice of Student Evaluations of Teaching (SET) is widespread across colleges and universities globally. Originating in the early 1920s, these evaluations are typically conducted at the conclusion of each academic term to gather insights from students regarding their experiences with instructors and courses. SET questionnaires commonly comprise a series of questions prompting students to assess their instructor's performance in areas such as clarity, organization, engagement, and overall effectiveness^[1]. At UCSD, these evaluations are made public on **Course and Professor Evaluations (CAPE)**, a platform managed by students to showcase collegiate opinions. With a response rate exceeding 50%, CAPE results are utilized by administrators and instructors to identify strengths and weaknesses, refine teaching methods, and furnish evidence for tenure and promotion decisions.
+
+Moreover, UCSD students frequently rely on CAPE for professor and course recommendations when making decisions about which classes and instructors to choose. Nevertheless, the reliability, validity, and potential bias of SET have been subjects of criticism^[2]. Despite these concerns, student evaluations of teaching persist as a widely-utilized tool for evaluating and enhancing instructional quality in higher education^[3].
+
+Recent research has illuminated various factors influencing student evaluations of teaching. These encompass conventional elements such as course load, course materials, and a professor's years of experience, as well as less conventional aspects like teaching style, attitude and even race and gender^[4]. Studies also indicate that SET not only assess professors' performance but also mirror the effectiveness of student learning. Given that many students heavily rely on CAPE for information on course and professor evaluations, our team is intrigued by the factors most impactful on **students' ratings of teaching instructor**. Leveraging data from UCSD's CAPE, our project aims to assess how **specific factors influence the recommendation rate of instructors in a specific course**.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+
+Note: The `wru` and `gender` packages do not run on Datahub because of dependency problems, so they are commented out here. We later show the code used for making gender and race predictions, but they do not execute in the knitted report.
+
+```{r message = FALSE}
+library(tidyverse)
+library(lubridate)
+#library(wru) # race prediction package
+#library(gender) # gender prediction package
+library(gridExtra)
+library(tidymodels)
+library(knitr)
+library(olsrr)
+```
+
+## Question
+
+1.  Which factor or combination of factors (average studying hours/week, grades received, etc) would affect the recommendation rate the most for an instructor for a course?
+
+The `capes.csv` dataset provides a comprehensive record of student evaluations of instructors and classes at the University of California, San Diego (UCSD) spanning from Summer 2007 to Winter 2023. With 60414 observations, the dataset encompasses a rich set of information, capturing diverse aspects related to instructor performance, course characteristics, and student experiences. 
+
+The dataset comprises ten original variables, including:
+
+1.  `Instructor` \| The name of the instructor leading the course.
+2.  `Course` \| The name of the course being evaluated.
+3.  `Term` \| The quarter in which the course was taught, with six possible values: Fall (FA), Winter (WI), Spring (SP), Summer Session 1 (S1), Summer Session 2 (S2), Summer Session 3 (S3), and Special Summer Session (SU).
+4.  `Enroll` \| The total number of students enrolled in each class.
+5.  `Evals_Made` \| The number of evaluations submitted by students.
+6.  `Rcmnd_Class` \| The recommendation rate for the class, expressed as a percentage.
+7.  `Rcmnd_Instr` \| The recommendation rate for the instructor, expressed as a percentage.
+8.  `Study_Hrs_wk` \| The average number of study hours per week reported by students.
+9.  `Avg_Grade_Expected` \| The average grade expected by students.
+10. `Avg_Grade_Received` \| The average grade received by students.
+
+Additionally, the dataset has been enhanced by a talented, amazing, overworked, sleep-deprived team of students, introducing supplementary variables to run models on. These include:
+
+-   `Department` \| Represents the department to which the course belongs.
+-   `STEM_non_STEM` \| Indicates whether the course is considered a STEM (Science, Technology, Engineering, and Mathematics) course (1) or not (0).
+-   `Division` \| Indicates whether the course is lower division or upper division.
+-   `Grade_Difference` \| Indicates the raw difference between `Avg_Grade_Expected` and `Avg_Grade_Received`.
+-   `Race` \| predictions of instructor race from the `wru` package, with NAs for non-predicted observations.
+-   ` raceUnknowns` \| predictions of instructor race from the `wru` package, with NAs recoded as "Unknown" for non-predicted observations.
+-   `Gender` \| predictions of instructor gender from the `gender` package, with NAs for non-predicted observations.
+-   `genderUnknowns` \| predictions of instructor gender from the `gender` package, with NAs recoded as "Unknown" for non-predicted observations.
+-   `Course_Subject` \| The subject of the course.
+-   `Course_Number` \| The number of the course.
+-   `Course_Title` \| The title of the course.
+-   `Term_Date` \| Indicates the start date of the quarter in the format "YYYY-MM-01" (We set the starting day as the first of the month).
+-   `Response_Rate` \| The CAPE response rate for each course.
+
+The dataset is a valuable resource for exploring and understanding the dynamics of student evaluations, instructor performance, and course characteristics at UCSD. Researchers and educators can leverage this dataset to gain insights into teaching effectiveness, student engagement, and factors influencing student perceptions across various disciplines and academic terms.
+
+### Data Import
+
+To start, we read in the CAPE data.
+
+```{r, message = FALSE}
+data <- read_csv('data/capes.csv')
+```
+
+## Data Wrangling
+
+### Main Variable Cleaning
+
+First, we converted `Rcmnd Class` and `Rcmnd Instr` to numeric variables, and got rid of the % sign in both. We also created a new variable called `Department`, which we extracted from the course name.
+
+```{r}
+data$`Rcmnd Class` <- as.numeric(str_replace_all(data$`Rcmnd Class`, "%", ""))
+data$`Rcmnd Instr` <- as.numeric(str_replace_all(data$`Rcmnd Instr`, "%", ""))
+data$`Avg Grade Expected` <- as.numeric(str_extract(data$`Avg Grade Expected`, "\\d+\\.?\\d*"))
+data$`Avg Grade Received` <- as.numeric(str_extract(data$`Avg Grade Received`, "\\d+\\.?\\d*"))
+# Extract department from course name
+data$Department <- tolower(str_extract(data$Course, "^[[:alpha:]]+"))
+```
+
+Next, we created a list of all the STEM departments, so that we can separate every class into a binary variable based on whether it is a STEM or a non-STEM class.
+
+```{r}
+stem <- list('beng',
+ 'bibc',
+ 'bicd',
+ 'bieb',
+ 'bild',
+ 'bimm',
+ 'bipn',
+ 'bisp',
+ 'sio',
+ 'ceng',
+ 'chem',
+ 'cogs',
+ 'cse',
+ 'ece',
+ 'eng',
+ 'envr',
+ 'esys',
+ 'fpmu',
+ 'mae',
+ 'math',
+ 'nano',
+ 'phys',
+ 'se',
+ 'glbh')
+```
+
+We then assigned STEM (1) and non-STEM (0) classification to a new variable `STEM_non_STEM`.
+
+```{r}
+data <- data |>
+  mutate(`STEM_non_STEM` = ifelse(Department %in% stem, 1, 0))
+```
+
+We recorded the Response Rate of CAPE in each class by taking the number of evaluations submitted (Evals) over the total enrollment (Enroll). We found that 272 classes had more people respond on CAPE than the number of enrolled students, so the response rate was over 100%. We recoded these classes to just have a 100% response rate.
+
+```{r}
+data$Response_Rate <- data$`Evals Made`/data$Enroll 
+data$Response_Rate <- ifelse(data$Response_Rate > 1, 1, data$Response_Rate)
+```
+
+Because some departments had multiple course codes, we referred to the [UCSD course catalog](https://catalog.ucsd.edu/front/courses.html) to group course codes into a Department variable.
+
+```{r}
+# Code of Department list change:
+Anthropology <- c("anar", "anbi", "ansc", "anth", "anpr", "anld", "gss", "tws")
+Biology <- c("bibc", "bicd", "bieb", "bild", "bimm", "bipn", "bisp")
+Scripp <- "sio"
+`College Writing` <- c("cat", "mcwp", 'doc', "hum", "mmw", "wcwp")
+Engineering <- c("being", "ceng", "cse", "ece", "eng", 'mae', 'nano', "se")
+`Critical Gender Studies` <- c("cgs", 'cocu')
+Chemistry <- "chem"
+`Cognitive Science` <- c('cogs', 'dsgn')
+Communication <- c('comm', 'comt', 'cosf')
+Others <- c('cont', 'cogn', 'cohi')
+Economics <- "econ"
+Education <- "eds"
+`Environmental Studies` <- c('envr', "esys")
+College <- c('erc', "muir", "rev", 'stpa', "sxth", "tmc", "warr")
+Sociology <- c('hmnr', 'soci', "ethn", "reli", "soce", "soca", "socb", "socc", "socd", "socl")
+Arts <- c('film', "vis", "icam", "mus")
+`Health&Medicine` <- c("fpmu", "glbh")
+Human <- "hdp"
+History <- c("hiaf", "hiea", "hieu", "hila", "hild", "hine", "hisc", "hito", "hius", "higl")
+`International Studies` <- "intl"
+Language <- c('japn', 'jwsp', 'chin')
+`Ethnic Studies` <- c('juda', 'lati')
+`Political Science` <- c('laws', "poli")
+Linguistic <- c("lign", "lihl", "lisp", "liab", "ligm", "liit", "lipo")
+Literature <- c("ltaf", "ltch", "ltcs", "ltea", "lten", "lteu", "ltfr", "ltgk", "ltgm", "ltit", "ltko", "ltla", "ltru", "ltsp", "ltth", "ltwl", "ltwr", "ltam", "elwr")
+Math <- "math"
+Philosophy <- "phil"
+Physics <- "phys"
+Psychology <- "psyc"
+Management <- "mgt"
+`Theater&Dance` <- c("tdac", "tdde", "tddm", "tddr", "tdge", "tdhd", "tdht", "tdmv", "tdpr", "tdpw", "tdtr", "tdpf", "tdch", "tmc")
+`Urban Planning` <- "usp"
+
+department_lists <- list(
+  Anthropology = Anthropology,
+  Biology = Biology,
+  Scripp = Scripp,
+  `College Writing` = `College Writing`,
+  Engineering = Engineering,
+  `Critical Gender Studies` = `Critical Gender Studies`,
+  Chemistry = Chemistry,
+  `Cognitive Science` = `Cognitive Science`,
+  Communication = Communication,
+  Others = Others,
+  Economics = Economics,
+  Education = Education,
+  `Environmental Studies` = `Environmental Studies`,
+  College = College,
+  Sociology = Sociology,
+  Arts = Arts,
+  `Health&Medicine` = `Health&Medicine`,
+  Human = Human,
+  History = History,
+  `International Studies` = `International Studies`,
+  Language = Language,
+  `Ethnic Studies` = `Ethnic Studies`,
+  `Political Science` = `Political Science`,
+  Linguistic = Linguistic,
+  Literature = Literature,
+  Math = Math,
+  Philosophy = Philosophy,
+  Physics = Physics,
+  Psychology = Psychology,
+  Management = Management,
+  `Theater&Dance` = `Theater&Dance`,
+  `Urban Planning` = `Urban Planning`
+)
+
+replace_department <- function(department_code) {
+  for (list_name in names(department_lists)) {
+    if (department_code %in% department_lists[[list_name]]) {
+      return(list_name)
+    }
+  }
+  return(department_code)
+}
+
+data$Department <- sapply(data$Department, replace_department)
+
+```
+
+Next, we made a new variable, `Grade Difference`, which we calculated by subtracting `Avg Grade Expected` from `Avg Grade Received`. We hypothesized that a large discrepancy between expected grade and grade received may contribute to recommendation rate.
+
+```{r}
+data <- data |>
+  mutate(`Grade Difference` = `Avg Grade Received` - `Avg Grade Expected`)
+```
+
+Next, for later analysis and parsing, we use the `lubridate` package in `tidyverse` to create a month-year variable from the current `term` variable, which we set to the new variable `Term_Date`. We set the month equal to the month that each quarter starts: January for Winter, April for Spring, June for Summer, and September for Fall, and the year to the year of the term.
+
+```{r}
+# creating new variable Term_Date with format 'YYYY-MM-DD'
+data <- data |>
+  mutate(Term_Date = case_when(str_detect(Term, 'WI') == TRUE ~ my(paste('01', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'SP') == TRUE ~ my(paste('04', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'S1') == TRUE ~ my(paste('06', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'S2') == TRUE ~ my(paste('06', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'S3') == TRUE ~ my(paste('06', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'SU') == TRUE ~ my(paste('06', paste0(20, substring(Term, first = 3)))),
+                               str_detect(Term, 'FA') == TRUE ~ my(paste('09', paste0(20, substring(Term, first = 3))))
+                               )
+         ) |>
+  mutate(Term_Date = as.Date(Term_Date, format = '%Y-%m-%d'))
+```
+
+### Predicting Gender
+
+Because the original dataset lacked instructor demographics, we want to at least predict gender to factor in our analysis. First we split `Instructor` into 3 name columns: first, middle, and last names.
+
+```{r, warning = FALSE, eval = FALSE}
+# name clean up that accounts for middle name
+test <- data |>
+  separate(Instructor, into = c("surname", "firstname", "middle"), sep = ",\\s*|\\s+", extra = "merge")
+```
+
+We created a dataframe with only unique names to use for gender prediction. Then we predict gender with the [gender](https://github.com/lmullen/gender) package using Social Security Admistration data in the method parameter.
+
+```{r, eval = FALSE}
+uniqueNames <- unique(test$firstname)
+uniqueNames <- gender(uniqueNames, method = "ssa")
+
+# check how many are ambiguous 
+ggplot(uniqueNames, aes(x = proportion_male)) +
+  geom_histogram()
+ggplot(uniqueNames, aes(x = proportion_female)) +
+  geom_histogram()
+# seems that there aren't a lot of ambiguous cases (not many around 0.50 prediction) so let's proceed (later realized that ambiguity translated to NAs)
+
+# Select necessary info from uniqueNames, so name + gender
+uniqueNames <- uniqueNames |>
+  select(name, gender) |>
+  rename(firstname = name)
+# Merge gender predicted names with left join to preserve original full dataset
+test <- left_join(test, uniqueNames, by = "firstname")
+```
+
+Notably, about 1760 unique names could be matched to male or female out of the 2300 unique names in our data. The new `gender` column is stored back in our temporary dataframe `test`.
+
+### Predicting Race with `wru`
+
+We continued with the test dataframe that separated the Instructor names into 3 columns. We applied the function `predict_race` from R package [wru](https://github.com/kosukeimai/wru) to make probabilistic estimates of each instructor's race based on surname:
+
+```{r, warning = FALSE, eval = FALSE}
+test <- predict_race(voter.file = test,
+             surname.only = TRUE,
+             census.key = "31e439a91f9ac9c78f4c6b630c93342f9d59475e")
+```
+
+This resulted in new columns representing the estimated probability of an instructor being White, Black, Hispanic, Asian, or other race using their surname and the 2010 US census.
+
+We used ChatGPT for assistance in writing a function looping through all rows of the test dataframe, extracting the highest race probability column, and returning the most likely race in a new column:
+
+```{r, eval = FALSE}
+getRace <- function(test) {
+  race_columns <- c("pred.whi", "pred.bla", "pred.his", "pred.asi", "pred.oth")
+  test$race <- apply(test[, race_columns], 1, function(row) {
+    max_index <- which.max(row)
+    max_race <- race_columns[max_index]
+    return(max_race)
+  })
+  return(test)
+}
+
+# apply getRace function
+test <- getRace(test)
+```
+
+Renamed observations in race to be cleaner:
+
+```{r, eval = FALSE}
+test <- test |>
+  mutate(race = ifelse(race == "pred.whi", "White",
+                ifelse(race == "pred.bla", "Black",
+                ifelse(race == "pred.his", "Hispanic",
+                ifelse(race == "pred.asi", "Asian",
+                ifelse(race == "pred.oth", "Other", race))))))
+```
+
+We pasted separated names back into one column, `Instructor`, and then merged to add race and gender data to original dataset.
+
+```{r, warning = FALSE, eval = FALSE}
+test <- test |>
+  mutate(Instructor = paste(surname, paste(firstname, middle, sep = " "), sep = ", "),
+         Instructor = str_replace_all(Instructor, "NA", ""))
+testClean <- test |>
+  select(Instructor, gender, race)
+
+mergetest <- left_join(data, testClean, by = "Instructor")
+# this gets rid of the duplicate observations
+capesRG <- distinct(mergetest)
+```
+
+We want to preserve missing race and gender values as NA so we can run linear regression model with *known* genders and races. But we also want to code these NA values as unknown in new columns `raceUnknowns` and `genderUnknowns` to show these unclassified observations in EDA and a different regression model, and see if there is a notable difference in excluding vs including NA race and gender.
+
+```{r, eval = FALSE}
+capesRG <- capesRG |>
+  mutate(raceUnknowns = ifelse(is.na(race), "Unknown", race),
+         genderUnknowns = ifelse(is.na(gender), "Unknown", gender))
+```
+
+Saved race and gender added dataset `capesRG` as RData file, then loaded and merged `test` dataset to the main dataset.
+
+```{r, warning = FALSE}
+# save(capesRG, file="data/capesRG.RData")
+load("data/capesRG.RData")
+# drop dupes in original so same num obs
+data <- distinct(data)
+# select columns to merge on and add to main df
+RG <- capesRG |>
+  select(Instructor, Course, Term, gender, race, raceUnknowns, genderUnknowns)
+testm <- left_join(data, RG, by = c("Instructor", "Course", "Term"))
+# drop duplicated rows
+data <- distinct(testm)
+```
+
+### Discussion of `wru` and `gender` Prediction Results
+
+The predictions are not as robust as we would hope.
+
+Evaluate how many race predictions from `wru` were less than 70% (indicates racial ambiguity, limit of surname only, and limit of package's predictive capabilities):
+
+```{r, eval = FALSE}
+evalWRU <- test |>
+  select(18:22)
+evalWRU <- evalWRU |>
+  mutate(less70race = apply(evalWRU[, 1:5], 1, function(row) max(row) < 0.7),
+         less50race = apply(evalWRU[, 1:5], 1, function(row) max(row) < 0.5),)
+```
+
+Over 20k/60k of observations (33%) have predicted max race with under 70% probability, but only 1400 observations with less than 50%, which is okay if we only care about plurality probability and not overwhelmingly strong prediction.
+
+Many observations were not assigned a race and/or gender prediction. We decided to still use the gender and race predictions in our models as we believe these to be important predictors of an instructor's recommendation rate, despite the limitations. If we were to re-run our analysis, we would spend additional time studying ways to improve our usage of the `gender` and `wru` packages, or consult additional prediction packages. Of course, the ideal data would be *true* race and gender of instructors.
+
+### Final Wrangling
+
+Here, we continue with final wrangling steps.
+
+We decided to recode `race` and `gender` as a factor for later modeling, setting "White" and "male" as the baseline for all comparisons.
+```{r}
+data$race <- factor(data$race, levels = c("White", "Black", "Hispanic", "Asian", "Other"))
+data$race <- relevel(data$race, ref = "White")
+
+data$raceUnknowns <- factor(data$raceUnknowns, levels = c("White", "Black", "Hispanic", "Asian", "Other", "Unknown"))
+data$raceUnknowns <- relevel(data$raceUnknowns, ref = "White")
+
+data$gender <- factor(data$gender, levels = c("male", "female"))
+data$gender <- relevel(data$gender, ref = "male")
+
+data$genderUnknowns <- factor(data$genderUnknowns, levels = c("male", "female", "Unknown"))
+data$genderUnknowns <- relevel(data$genderUnknowns, ref = "male")
+```
+
+We separated `Course` into three different variables: `Course_Subject`, `Course_Number`, and `Course_Title`. Then, we classified whether a class was an upper division class or a lower division class in the variable `Division`.
+
+```{r}
+data <- data %>%
+  # separate by space, if there are more than 3 spaces, merge everything after the 3rd space into the `Course Title` Column
+    separate(Course, into = c("Course_Subject", "Course_Number", "Course_Title"), sep = " ", extra = "merge") 
+
+data$Course_Number_Numeric <- as.numeric(gsub("[^0-9]", "", data$`Course_Number`))
+
+data <- data |>
+  mutate(
+    Division = ifelse(Course_Number_Numeric <= 99, "Lower", "Upper"))
+```
+
+Finally, we cleaned up our variable names to remove all spaces and replace them with underscores.
+
+```{r}
+data <- data |>
+  rename(`Evals_Made` = `Evals Made`,
+         `Rcmnd_Class` = `Rcmnd Class`,
+         `Rcmnd_Instr` = `Rcmnd Instr`,
+         `Study_Hrs_wk` = `Study Hrs/wk`,
+         `Avg_Grade_Expected` = `Avg Grade Expected`,
+         `Avg_Grade_Received` = `Avg Grade Received`,
+         `Grade_Difference` = `Grade Difference`)
+```
+
+Use `skim` to check for missingness and any other things going on with the data we didn't already catch.
+
+```{r}
+skimr::skim(data)
+```
+We note here that there are 1436 missing observations for `Avg_Grade_Expected` because students submit CAPE before final exams, which means there is often grade uncertainty to result in non-responses for that question. In addition, there are 16646 missing observations for `Avg_Grade_Received`, probably due to smaller classes and delayed grades. 
+
+A look at the cleaned data:
+
+```{r}
+kable(head(data))
+```
+
+This looks as expected! We can proceed to EDA.
+
+## Exploratory Data Analysis
+
+From skimming the dataset earlier, we already previewed skewed distributions. Let's look more closely.
+
+### Univariate Plots
+
+Here, we plotted histograms for all the numeric columns, so we can get a sense of the data including the ranges. We changed the `binwidth` for the grade variables (`Avg_Grade_Expected`, `Avg_Grade_Received`, `Grade_Difference`, and `Response_Rate` to be 0.1 or 0.2 instead of the default of 1, so we could more easily see the distribution.
+
+```{r, warning = FALSE}
+variables<- c("Enroll", "Evals_Made", "Rcmnd_Class", 
+                            "Rcmnd_Instr", "Study_Hrs_wk", 
+                            "Avg_Grade_Expected", "Avg_Grade_Received", "Response_Rate", "Grade_Difference")
+
+# Reshape the data into long format
+data_long <- gather(data, key = "Variable", value = "Value", all_of(variables))
+
+# Plot histograms using ggplot2
+ggplot(data_long, aes(x = Value)) +
+  geom_histogram(
+    data = subset(data_long, Variable %in% c("Enroll", "Evals_Made", "Rcmnd_Class", "Rcmnd_Instr", "Study_Hrs_wk")),
+    binwidth = 1, fill = "skyblue", color = "black"
+  ) +
+  # change bin width to 0.2 for average grade expected, average grade received, and grade difference, to make it easier to visualize
+  geom_histogram(
+    data = subset(data_long, Variable %in% c("Avg_Grade_Expected", "Avg_Grade_Received", "Grade_Difference")),
+    binwidth = 0.2, fill = "skyblue", color = "black"
+  ) +
+  # change bin width to 0.1 for response rate, to make it easier to visualize
+  geom_histogram(
+    data = subset(data_long, Variable %in% c("Response_Rate")),
+    binwidth = 0.1, fill = "skyblue", color = "black"
+  ) +
+  facet_wrap(~Variable, scales = "free") +
+  labs(title = "Histograms for Numeric Variables", x = "Value", y = "Frequency") +
+  theme_minimal()
+```
+
+As seen in the histogram above, the `Avg_Grade_Expected` and `Avg_Grade_Received` have similar distribution, both slightly skewed left, and `Avg_Grade_Received` is, overall, slightly higher than Expected. The `Enroll` and `Evals_Made` graphs have similar shapes, both heavily skewed right, reflecting that most classes at UCSD are smaller in size. The `Rcmnd_Class` and `Rcmnd_Instr` histograms are heavily skewed left, indicating that most students recommend classes and professors at UCSD, which aligns with our expectation. The `Response_Rate` appears relatively normal, and peaked at around 0.5. The `Study_Hrs_wk` is also fairly symmetrical around 5, showing that on average, students are expected to spend five hours per week studying for each class.
+
+Beside the outcome variable `Rcmnd_Instr`, the `Enroll`, `Evals_Made` and `Rcmnd_Class` are heavily skewed, so our team decided to normalize them by taking the natural log of their values. But first, we checked for values of 0 in the original variables.
+
+```{r}
+sum(data$Rcmnd_Class==0) # has 0s
+sum(data$Avg_Grade_Expected==0, na.rm = TRUE)
+sum(data$Avg_Grade_Received==0, na.rm = TRUE)
+sum(data$Rcmnd_Instr==0) # has 0s
+sum(data$Response_Rate==0)
+sum(data$Enroll==0)
+```
+
+The variables with values of 0 are `Rcmnd_Class` and `Rcmnd_Instr`. There were 13 cases where a class in a particular term had a recommendation rate of 0% and 35 cases where a professor teaching a class in a particular term had a recommendation of 0%. This can be due to rounding down to 0.
+
+```{r}
+data |>
+  filter(Rcmnd_Instr == 0) |>
+  head(10)
+
+data |>
+  filter(Rcmnd_Class == 0) |>
+  head(10)
+```
+
+We can see here that the primary cause of these 0 cases is low enrollment and CAPE response rate. Let's recode the 0s as tiny numbers close to 0 so we can log the variables.
+
+```{r}
+data$Rcmnd_Instr <- ifelse((data$Rcmnd_Instr) <= 0, 0.1, round(data$Rcmnd_Instr, 2))
+range(data$Rcmnd_Instr)
+
+data$Rcmnd_Class <- ifelse((data$Rcmnd_Class) <= 0, 0.1, round(data$Rcmnd_Class, 2))
+range(data$Rcmnd_Class)
+```
+
+We also want to log these variables and make them new columns, which will be helpful later when we're doing modeling and linear regression.
+
+```{r}
+data$Log_Enroll <- log(data$Enroll)
+data$Log_Evals_Made <- log(data$Evals_Made)
+data$Log_Rcmnd_Class <- log(data$Rcmnd_Class)
+```
+
+Here's a histogram of the numeric variables (transformed to the log scale) for `Enroll`, `Evals_Made`, `Rcmnd_Class`.
+
+```{r}
+variables_2<- c("Enroll", "Evals_Made", "Rcmnd_Class")
+
+data_long_2 <- gather(data, key = "Variable", value = "Value", all_of(variables_2))
+
+# Plot histograms using ggplot2
+ggplot(data_long_2, aes(x = log(Value))) +
+  geom_histogram(
+    data = subset(data_long_2, Variable %in% c("Enroll", "Evals_Made")),
+    binwidth = 1, fill = "skyblue", color = "black"
+  ) +
+  # change bin width to 0.5 for recommend class, to make it easier to visualize
+  geom_histogram(
+    data = subset(data_long_2, Variable %in% c("Rcmnd_Class")),
+    binwidth = 0.5, fill = "skyblue", color = "black"
+  ) +
+  facet_wrap(~Variable, scales = "free") +
+  labs(title = "Histograms for Logged Numeric Variables", x = "Log Value", y = "Frequency") +
+  theme_minimal()
+```
+
+Logging `Enroll` and `Evals_Made` helped to normalize the distribution, but `Rcmnd_Class` is still skewed to the left :(
+
+Now, we can look at race and gender distributions.
+
+```{r}
+# df subset with removed NA gender and race observations
+uniqueInstr <- data |>
+  distinct(Instructor, .keep_all = TRUE)
+
+g1 <- ggplot(uniqueInstr, aes(x = genderUnknowns)) +
+  geom_bar() +
+  labs(x = "Predicted Instructor Gender") +
+  theme_classic()
+
+r1 <- ggplot(uniqueInstr, aes(x = raceUnknowns)) +
+  geom_bar() +
+  labs(x = "Predicted Instructor Race") +
+  theme_classic()
+
+grid.arrange(g1, r1, ncol = 2,
+             top = "There are more male and white professors than women and racial minorities.")
+```
+
+First, we look at the distribution of race and gender of the instructor rating. We calculated that there are around 20% Female, 36% Male, and 44% Unknown. As discussed earlier, there are also many non-predicted race and gender observations.
+
+```{r}
+uniqueInstr |>
+  select(Instructor, raceUnknowns, genderUnknowns) |>
+  filter(raceUnknowns == "Unknown", 
+         genderUnknowns == "Unknown") |>
+  sample_n(10) # instead of top 10 observations of unknown race + gender instructors, view random 10
+```
+
+It appears that there is racial and gender diversity in the types of names that could not be predicted with the packages, indicating that there is no systematic error. We will likely see little difference between excluding vs including non-predictions in our models later.
+
+We also compared the counts of lower division classes and upper division classes, to see their distribution.
+
+```{r}
+# Extract numeric part of Course Number using regular expression
+data$Course_Number_Numeric <- as.numeric(gsub("[^0-9]", "", data$Course_Number))
+
+# Plot the number of lower divs vs upper divs
+ggplot(data, aes(x = Division, fill = Division)) +
+  geom_bar() +
+  labs(title = "Course Division Comparison", subtitle = "There are twice as many upper division class than lower division ones.", x = "Division", y = "Count") +
+  theme_minimal()
+```
+
+We see that there are around twice as many upper division classes as lower division ones, which can be explained by lower division classes generally being larger in enrollment with upper division classes being more specialized and specific, leading to more variety in classes.
+
+### Bivariate Plots
+
+Here, we plot the breakdown of instructor ratings by race and gender.
+
+```{r}
+ggplot(data, aes(x = raceUnknowns, y = Rcmnd_Instr)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(title = "Similar instructor recommendation rates across all predicted races",
+       x = "Race of Instructor",
+       y = "Instructor Recommendation Rate")
+```
+
+Across all races, instructors appear to have similar distribution of recommendation rate, with the higher quartile at 100%, lower quartile at 85%, and median at 95%. There is one exception - the category "Other" has lower distribution than the rest, with the median at around 85%. While we do not know the exact reason for said difference, our team hypothesizes that it could be due to insufficient data in the category "Other".
+
+```{r}
+# check to see number of observations for "Other" races
+sum(data$raceUnknowns == "Other")
+```
+
+There are only 8 observations of "Other" races, which explains why it had a lower distribution.
+
+Now, we look at gender and recommendation rates:
+
+```{r}
+ggplot(data, aes(x = genderUnknowns, y = Rcmnd_Instr)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(title = "Similar instructor recommendation rates across predicted gender",
+       x = "Gender of Instructor",
+       y = "Instructor Recommendation Rate")
+```
+
+In this plot, we can see that there are similar recommendation rates for instructors across gender. There is a slightly higher average recommendation rate for female instructors, but this doesn't seem to be too significant.
+
+Overall, It appears there aren't notable variations across race and gender, except for "Other" race having a lower median and range of instructor recommendation rate. 
+
+Now, we are plotting how different variables affect the % instructor recommended, including lower vs. upper division classes, non-STEM vs. STEM classes, and instructor ratings over time.
+
+```{r}
+# Plot the comparison using ggplot2
+ggplot(data, aes(x = Division, y = `Rcmnd_Instr`, fill = Division)) +
+  geom_boxplot() +
+  labs(title = "Instructor Recommendation Rate by Division", x = "Division", y = "Recommendation for Instructor (%)") +
+  theme_minimal()
+```
+
+In this box plot, we can see that the distribution and median are pretty similar for lower division compared to upper division classes, suggesting that whether a class is lower or upper division doesn't make a big difference in the overall instructor rating.
+
+```{r}
+# Convert 'STEM_non_STEM' to a factor
+data$`STEM_non_STEM` <- factor(data$`STEM_non_STEM`, levels = c(0, 1), labels = c("Non-STEM", "STEM"))
+
+# Plot the comparison using ggplot2
+ggplot(data, aes(x = `STEM_non_STEM`, y = `Rcmnd_Instr`, fill = `STEM_non_STEM`)) +
+  geom_boxplot() +
+  labs(title = "Instructor Recommendation Rate by STEM vs Non-STEM", 
+       x = "Category", y = "Recommendation for Instructor (%)") +
+  scale_fill_manual(values = c("Non-STEM" = "red", "STEM" = "green")) +
+  theme_minimal()
+```
+
+In this box plot, we're comparing STEM vs. non-STEM classes and how that affects the instructor rating. As we can see, there is definitely a difference, with STEM classes on average receiving lower ratings than non-STEM classes.
+
+Plotting instructor ratings over time:
+
+```{r, warning=FALSE}
+# Plot the median recommendation for instructor ratings over time using ggplot2
+ggplot(data, aes(x = Term_Date, y = `Rcmnd_Instr`)) +
+  # geom_point(alpha = 0.5) +  # Individual points
+  stat_summary(fun = median, geom = "line", color = "blue", size = 1) +  # Median line
+  labs(title = "Median Recommendation for Instructor Ratings Over Time",
+       x = "Term Date", y = "Recommendation for Instructor (%)") +
+  # scale_x_date(breaks = unique(new_data$Term_Date)) +
+  theme_minimal()
+```
+
+Lastly, we are plotting the instructor ratings over time. We can see that generally the instructor ratings stays consistent throughout the years, with a cyclical cycle where the median of the instructor rating peaks and then falls downward depending on the quarter, all within the range of 92-100%.
+
+## Modeling
+
+### Single Variable Models
+
+We then wanted to see if any of our predictors had a linear correlation with our outcome variable, `Rcmnd Instr`, so we fit a linear model for each one, and plotted scatter plots with the regression lines (excluding categorical variables).
+
+#### Categorical Variables
+
+```{r}
+# STEM_non_STEM
+m_stem_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ factor(`STEM_non_STEM`), data = data) |>
+  tidy()
+kable(m_stem_reci)
+```
+
+In this linear model, STEM classes appear to have 5.29 percentage point lower instructor recommendations compared to non-STEM classes.
+
+```{r}
+# Division
+m_div_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ factor(`Division`), data = data) |>
+  tidy()
+kable(m_div_reci)
+```
+
+In this linear model, upper division classes appear to have 0.84 percentage point higher instructor recommendations compared to lower division classes.
+
+#### Numerical Variables
+
+```{r}
+# Rcmnd Class
+m_rc_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Rcmnd_Class`, data = data) |>
+  tidy()
+
+rcplot <- ggplot(data, aes(x = `Rcmnd_Class`, y = `Rcmnd_Instr`)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+```
+
+```{r}
+# Study Hrs/wk
+m_sh_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Study_Hrs_wk`, data = data) |>
+  tidy()
+
+shplot <- ggplot(data, aes(x = `Study_Hrs_wk`, y = `Rcmnd_Instr`)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+```
+
+```{r}
+# Grade Difference
+m_gd_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Grade_Difference`, data = data) |>
+  tidy()
+
+gdplot <- ggplot(data, aes(x = `Grade_Difference`, y = `Rcmnd_Instr`)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+```
+
+```{r}
+# Response Rate
+m_rr_reci <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Response_Rate`, data = data) |>
+  tidy()
+
+rrplot <- ggplot(data, aes(x = `Response_Rate`, y = `Rcmnd_Instr`)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+```
+
+Here's a look at all the correlation plots for numerical variables against `Rcmnd_Instr`:
+
+```{r message = FALSE, warning = FALSE}
+grid.arrange(rcplot, shplot, gdplot, rrplot)
+```
+
+The plots above reveal that there doesn't seem to be a very strong linear correlation between `Rcmnd_Instr` and any of the single variables. However, `Rcmnd_Class`, in particular, does appear to have a positive correlation with `Rcmnd_Instr`.
+
+### Multiple Linear Regression
+
+First, we're going to run a linear regression model on the outcome variable `Rcmnd_Instr` with all the explanatory variables, which include `Grade_Difference`, `Enroll`, `Rcmnd_Class`, `Study_Hrs_wk`, `Avg_Grade_Expected`, `Avg_Grade_Received`, `Department`, `STEM_non_STEM`, `Response_Rate`, `raceUnknowns`, and `genderUnknowns`.
+
+```{r}
+m1 <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Grade_Difference` + Enroll + Rcmnd_Class + `Study_Hrs_wk` + Avg_Grade_Expected + Avg_Grade_Received + Department + `STEM_non_STEM` + Response_Rate + genderUnknowns + raceUnknowns + Division, data = data)
+
+glance(m1)
+tidy(m1)
+```
+
+The adjusted R-squared is about 0.506, which means this combination of predictors can explain about 50.6% of the variation in recommendation rate for an instructor teaching a particular course. We can observe variation in different departments and many small coefficients, which is to be expected with a lot of predictors. `Avg_Grade_Received` resulted in a row of NAs despite not being the only variable with missing values, so we could interpret this variable as not affecting instructor recommendation rates. We include it in future models to see if it becomes important.
+
+We ran the same model with only known races and genders, which removed the NA race and gender observations:
+
+```{r}
+m2 <- linear_reg() |>
+  set_engine('lm') |>
+  fit(`Rcmnd_Instr` ~ `Grade_Difference` + Enroll + Rcmnd_Class + `Study_Hrs_wk` + Avg_Grade_Expected + Avg_Grade_Received + Department + `STEM_non_STEM` + Response_Rate + gender + race + Division, data = data)
+
+glance(m2)
+tidy(m2)
+```
+
+There is no substantial difference in adjusted R-squared between including and excluding unknown races and genders in the model. But the intercept changed from 3.56 to 5.86 and many coefficients shifted. We will proceed with including the unknown races and genders to preserve as many observations as possible in future models.
+
+We ran a model with some interaction terms. Gender could interact with race---being female could heighten the effects of being a racial minority compared to being white. STEM instructors-classes could interact with study hours because they require more time than non-STEM, putting a disproportionately greater emphasis on the study hours predictor.
+
+```{r}
+m3 <- lm(`Rcmnd_Instr` ~ `Grade_Difference` + Enroll + Rcmnd_Class + `Study_Hrs_wk` + `Avg_Grade_Expected` + `Avg_Grade_Received` + Department + `STEM_non_STEM` + `Response_Rate` + genderUnknowns + raceUnknowns + Division + genderUnknowns:raceUnknowns + `STEM_non_STEM`:`Study_Hrs_wk`, data = data)
+summary(m3)
+```
+
+The STEM/non-STEM and study hours per week interaction term was statistically significant, but has a small coefficient of -0.13. The race and gender interaction term yielded surprising results: most combinations of race and gender were statistically insignificant or had no effect in our outcome when either gender or race were unknown. The exception is black female professors, who are boosted 4.06 percentage points in their recommendation rates added to the base effects of being black (-3.74) and female (-0.67).
+
+
+### Multiple Linear Regression with Logged Variables
+
+Now we use model 3 with the 2 interaction terms, `genderUnknowns:raceUnknowns` and `STEM_non_STEM`:`Study_Hrs_wk`, and the logged versions of `Enroll` and `Rcmnd_Class`. 
+
+```{r}
+# with interaction terms + logged variables
+m4 <- lm(Rcmnd_Instr ~ Grade_Difference + Log_Enroll + Log_Rcmnd_Class + Study_Hrs_wk + Avg_Grade_Expected + Avg_Grade_Received + Department + STEM_non_STEM + Response_Rate + genderUnknowns + raceUnknowns + Division + genderUnknowns:raceUnknowns + STEM_non_STEM:Study_Hrs_wk, data = data)
+summary(m4)
+```
+This resulted in a slightly lower R-squared (0.4732) than we had in the third model (0.5059), with less interpretability. So let's continue with model 3. 
+
+
+### Stepwise AIC Backwards Regression
+
+Let's use backwards selection to see which variables are important; backward selection fits all predictors and eliminates them by removing one at a time until it determines which ones were not important in explaining instructor recommendation rate in a particular course. Using backwards step on the third model:
+
+```{r}
+# commented out since it was taking too long to run when we were knitting at the end
+# ols_step_backward_p(m3)
+```
+The result of backwards step on our third model resulted in no variables removed. This suggests that our intuition to include these variables in our model was correct as they all had an impact on instructor recommendation rate.
+
+
+## Conclusion
+
+### Final Model
+
+Our best model is model 3. 
+
+We found the **strongest statistically significant* predictors** to be: 
+
+- *average grade expected*, with a coefficient of 4.53
+
+- *STEM/non-STEM*, with a coefficient of 5.04
+
+- *response rate*, with a coefficient of 4.10
+
+- *department*, which had a range of coefficients from -8.81 for the math department to 8.33 for college writing (compared to the baseline Anthropology) 
+
+We noted that p-values across departments varied as well; not all departments were statistically significant.
+
+These coefficients indicate a percentage point increase or decrease in instructor recommendation rate in a given course for a one unit increase in the associated variable. The intercept of 3.23 means that before accounting for any variables, an instructor should have a base level recommendation rate of 3.23% on average for a given course.
+
+Other statistically significant predictor coefficients. Note that gender uses male as the baseline and race uses White as the baseline.
+
+- gender, being female: -0.67
+- race, being Black: -3.73
+- race, being Asian: 1.10
+- unknown gender: -2.83
+- unknown race: 2.05
+- interaction of STEM/not-STEM to study hours: -0.13
+- interaction of race and gender; Black female: 4.06
+- grade difference: 1.91
+- recommend class: 0.77
+
+**Not statistically significant:**
+
+- division (upper or lower)
+
+- some departments, such as Ethnic Studies and Urban Planning
+
+- many of the race and gender interactions
+
+*We used p-value alpha of 0.05 for statistical significance. 
+
+Average grade received also appeared to not have an effect on the model or be too closely correlated with grade expected or grade difference.
+
+#### Discussion of Results
+
+It makes sense that higher expected grades and higher response rates yield higher recommendation instructor rates. But, we are surprised by some of the coefficients. We hypothesized STEM courses to penalize recommendation rates compared to non-STEM, but this was not the case. Perhaps there are extremes, such as the math and college writing department examples, but the average professor in a STEM course is rated more highly, or we may have made some errors in our classifications of STEM/not-STEM. 
+
+The demographics results were more varied than we assumed, both in practical and statistical significance. Our main finding in this area is that with the interaction term, black female professors can mitigate the base black and female penalties by 4.06 percentage points for a sort of net neutral effect (-3.73 - 0.67 = -0.34). This implies that black male professors do not have this added interaction effect, and are therefore the demographic penalized the hardest.
+
+### Limitations
+
+Other data we believe would help explain the other variation in the instructor recommendation rate in a particular course are teaching quality and learning outcomes. Teaching quality and learning outcomes could be measured with 1-10 ranges to "How much did you learn?" and "How was the quality of instruction?" Studies have noted that SET suffer from measurement bias. The predictors have little to do with teaching effectiveness, which is not our main question, but important to acknowledge so that our results are not misinterpreted. We were instead interested in a combination of variables about student *perceptions* and academic discipline differences and how these factored into instructor-course recommendation rates.
+
+We added race and gender predictions, which had its flaws as discussed earlier. Our intuition for the addition of these predictors was to get at biases that could not be measured with the given variables. Meta analysis studies^[5] find that racial and gender biases are not black-and-white, but can differ by discipline and respondent demographics. The study also notes that indicators of demographic bias would be better captured by qualitative data.
+
+Overall, there is much to be studied about instructor evaluation beyond the data available from CAPE.
+
+## Citations
+
+[^1] Freishtat, Richard L. "Expert report on student evaluations of teaching (SET)." (2016). https://ocufa.on.ca/assets/RFA.v.Ryerson_Freishtat.Expert.Supplemental.Reports_2016.2018.pdf 
+
+[^2] Zombor Berezvai, Gergely Dániel Lukáts & Roland Molontay (2021) Can professors buy better evaluation with lenient grading? The effect of grade inflation on student evaluation of teaching, Assessment & Evaluation in Higher Education, 46:5, 793-808, DOI: 10.1080/02602938.2020.1821866 
+
+[^3] Greenwald, A. G., & Gillmore, G. M. (1997). No pain, no gain? The importance of measuring course workload in student ratings of instruction. Journal of Educational Psychology, 89(4), 743–751. https://doi.org/10.1037/0022-0663.89.4.743
+
+[^4] Troy Heffernan (2022) Sexism, racism, prejudice, and bias: a literature review and synthesis of research surrounding student evaluations of courses and teaching, Assessment & Evaluation in Higher Education, 47:1, 144-154, DOI: 10.1080/02602938.2021.1888075 
+
+[^5] Kreitzer, R.J., Sweet-Cushman, J. Evaluating Student Evaluations of Teaching: a Review of Measurement and Equity Bias in SETs and Recommendations for Ethical Reform. J Acad Ethics 20, 73–84 (2022). https://doi.org/10.1007/s10805-021-09400-w
+
+Note: The dataset `capes.csv` was collected by Tram Nguyen. Thanks Tram!
